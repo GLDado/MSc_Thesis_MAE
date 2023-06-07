@@ -1,0 +1,9 @@
+In the folder "RAW DATA", four folders are shown: INTERTIDAL, PDAMICORNIS, SEAGRASS, and TEMPERATURE. In the following paragraphs, the content of the folders are described.
+
+INTERTIDAL contains two excel one excel document (Coral growth - experiments_Intertidal 2022.xlsx) where the measured parameters were noted in different columns per date. The dates are displayed with "_[number]". Each number represents a timepoint when the parameters were measured.
+
+PDAMICORNIS contains two excel documents: "Coral bleaching - experiment Pdamicornis 2022.xlsx" and "Coral growth - experiment Pdamicornis 2022.xlsx". Coral growth contains similar data as the excel document "Coral growth - experiments_Intertidal 2022.xlsx". The other document contains data that is based on coloration of the coral fragments.
+
+SEAGRASS shows how density of seagrass is catagorized at a mini nursery tree, treatment and coral species from the 'intertidal experiment'.
+
+TEMPERATURE contains two datasets that were obtained from NOAA and the HOBO loggers.
