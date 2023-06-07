@@ -1,0 +1,404 @@
+---
+  title: "Clean"
+author: "Ewout Knoester & Gian Lu Dado"
+date: "11 April 2023"
+output: html_document
+---
+  
+  # Setup
+  ```{r setup, include=FALSE}
+rm(list=ls()) # Clear workspace
+knitr::opts_knit$set(root.dir = '/tmp') #Set directory at current directory for all subsequent chunks
+
+setwd("~/Documents/Analysis/PDAMICORNIS")
+getwd()
+
+library(readxl) # Import excel sheets
+library(tidyverse) # Tidy data
+library(panelr) # Convert data from wide to long
+library(nlme) # GLS
+library(emmeans) # Pairwise comparisons
+library(betareg) # Beta regression
+library(ggthemes) # Pretty plots
+library(car) # ANOVA results GLM
+library(NCmisc) # Check packages used
+library(writexl)
+library(cowplot) # Combine plots
+library(e1071) # Determine skewness coefficient
+
+# Function to facilitate averaging datasets
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE),
+      n  = length(x[[col]]),
+      se = sd(x[[col]], na.rm=TRUE)/sqrt(length(x[[col]])))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+  return(data_sum)
+}
+```
+
+# Data selection (preparing dataset for archiving & sharing)
+```{r data selection, include=FALSE}
+
+# Import excel sheet
+raw.data <- read_excel("Coral growth - experiment Pdamicornis 2022.xlsx", sheet = "DATA") 
+
+# Insert new columns to calculate average SGR over a whole period while maintaining same wide-format style data after the last column of raw.data
+raw.data.1 <- as.data.frame(append(raw.data, list(Date_3 = "2023-03-22", Length_3 = NA, Width1_3 = NA, Width2_3 = NA, EV_3 = NA, Condition_3 = NA, Cause_3 = NA,SGR_3 = NA, Comments_3 = NA), after = (ncol(raw.data))))
+
+## Calculate SGR (Specific Growth Rate) over whole period and per month
+raw.data.1$SGR_1<- log(raw.data.1$EV_1/raw.data.1$EV_0)/as.numeric(as.Date(as.character(raw.data.1$Date_1), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_0), format="%Y-%m-%d"))
+
+raw.data.1$SGR_2 <-log(raw.data.1$EV_2/raw.data.1$EV_1)/as.numeric(as.Date(as.character(raw.data.1$Date_2), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_1), format="%Y-%m-%d"))
+
+raw.data.1$SGR_3<- log(raw.data.1$EV_1/raw.data.1$EV_0)/as.numeric(as.Date(as.character(raw.data.1$Date_1), format="%Y-%m-%d") - as.Date(as.character(raw.data.1$Date_0), format="%Y-%m-%d"))
+
+## Fill in end Condition for Average time factor (NB: end Condition will be used in analysis)
+raw.data.1$Condition_3 <- raw.data.1$Condition_1
+raw.data.1$Cause_3 <- raw.data.1$Cause_1
+
+# Convert to long data frame
+raw.data.2 <- as.data.frame(long_panel(raw.data.1, prefix = "_" , begin = 0, end = 3, label_location = "end"))
+
+raw.data.2$Cause[raw.data.2$Condition > 0] <- NA # All fragments with Condition>0.0 are considered alive
+
+## Set species and rename
+species.order = c("Pocillopora damicornis")
+  
+raw.data.2 %<>% 
+  mutate(Species = Species %>% 
+           factor(levels = species.order))
+
+## Read in NAs properly
+raw.data.2$SGR[raw.data.2$SGR == "NA"] <- NA
+raw.data.2$Cause[raw.data.2$Cause == "NA"] <- NA
+
+## Set correct data types
+raw.data.2$SGR <- as.numeric(raw.data.2$SGR)
+raw.data.2$Date <- format(raw.data.2$Date, "%m/%Y")
+
+## Merge overlapping months for visualization purposes
+date.order = c("11/2022", "12/2022","02/2023","03/2023") 
+
+raw.data.2 %<>%
+  mutate(Date = Date %<>% 
+           factor(levels = date.order)%>% 
+  fct_recode('Average' = '03/2023'))
+
+# Drop and reorder some columns
+clean.data <- raw.data.2 %>%
+  dplyr::select(c("id", "Structure", "Position", "Species", 
+           "Date", "Length", "Cause", "EV","Condition", "SGR")) 
+
+# Tidy formatting data frame
+clean.data$Length <- round(clean.data$Length, 1)
+clean.data$EV <- round(clean.data$EV, 0)
+clean.data$SGR <- round(clean.data$SGR, 3)
+
+# Remove data from February 2023
+clean.data <- subset(clean.data, Date != "02/2023")
+
+# Export data selection
+write_xlsx(clean.data, "PD_Cleaning experiment.xlsx") # Save clean.data as a new excel document.
+
+```
+
+# Data cleaning
+```{r data cleaning}
+
+# Import excel sheet
+clean.data.1 <- read_excel("PD_Cleaning experiment.xlsx", sheet = 1)
+
+# Set correct data types
+clean.data.1$Structure <- factor(clean.data.1$Structure)
+clean.data.1$Species <- as.factor(clean.data.1$Species)
+clean.data.1$SGR <- as.numeric(clean.data.1$SGR)
+clean.data.1$Cause <- factor(clean.data.1$Cause)
+clean.data.1$Date <- ordered(clean.data.1$Date, c("11/2022", "12/2022","Average"))
+clean.data.1$Position <- as.factor(clean.data.1$Position)
+
+# Create subset to inspect missing values
+missing <- subset(clean.data.1, Cause == "missing")
+dead<-subset(clean.data.1, Cause == "dead")
+
+## Summary of missing values 
+### Indicating that missing fragments are roughly equally distributed across Treatments
+summary(missing)
+summary(dead)
+
+#! Decision to leave out missing fragments from analysis as pattern is not related to Treatment
+clean.data.1 <- clean.data.1[-which(clean.data.1$Cause == "missing"),]
+
+write_xlsx(clean.data.1, "PD_Cleaning experiment_new.xlsx") # Save clean.data.1 as a new clean excel document.
+```
+
+# SGR analysis
+## Model selection
+```{r SGR: linear model selection}
+
+clean.data.1 <- read_excel("PD_Cleaning experiment_new.xlsx", sheet = 1)
+
+# DATA PREP
+## Create subset for SGR where Condition > 80: only healthy corals will be used to determine SGR
+sgr.data <- subset(clean.data.1, Condition >= 80 | is.na(Condition))
+sgr.data <- subset(sgr.data, !(is.na(SGR))) # Exclude SGR with NA
+
+# Set correct data types
+sgr.data <- sgr.data %>% separate(Structure, c('Treatment', 'Tree'))
+sgr.data$Treatment <- factor(sgr.data$Treatment)
+sgr.data$Tree<- factor(sgr.data$Tree)
+sgr.data$Species<-factor(sgr.data$Species)
+sgr.data$Date <- ordered(sgr.data$Date, c("11/2022", "12/2022","Average"))
+sgr.data$Position<-as.factor(sgr.data$Position)
+
+## Simplify data by taking average SGR: ignore effect of time (bleaching event/seasons)
+sgr.data.1 <- subset(sgr.data, Date != "Average")
+
+## Exclude columns not used
+sgr.data.1 <- sgr.data.1 %>%
+  dplyr::select(-c("Length", "Cause", "Condition", "EV"))
+
+```
+
+## SGR per date - Model
+```{r}
+
+# MODEL
+## Random factor to account for non-independence of multiple coral fragments in same nursery Structure
+### Full model without random factor
+lme.sgr.0r  <- gls(SGR ~ Treatment, method = "REML", na.action = na.omit,
+                   data = sgr.data.1) # AIC = -1941.953
+
+### Full model with random factor
+lme.sgr.1r  <- lme(SGR ~ Treatment, method = "REML", na.action = na.omit, random = ~1 | Tree, data = sgr.data.1) # AIC = -1942.558
+
+AIC(lme.sgr.0r, lme.sgr.1r) # Tree as random factor improves model substantially and accounts for pseudo-replication
+
+## Allowing for heterogeneity among Treatments
+lme.sgr.2r.S  <- lme(SGR ~ Treatment, method = "ML", na.action = na.omit, random = ~1 | Tree, data = sgr.data.1, weights = varIdent(form = ~1 | Species)) #-1989.560
+
+# Allowing for heterogeneity among Treatments
+# Model with lmer: fitting more complex mixed models to larger data sets
+lmer.sgr.2r.S  <- lmer(SGR ~ Treatment + (1 | Tree), na.action = na.omit, data = sgr.data.1) #-1942.558
+
+AIC(lme.sgr.2r.S, lmer.sgr.2r.S) # Tree as random factor improves model substantially and accounts for pseudo-replication. lme.sgr.2r.S has the lowest AIC, suggesting to be the best model.
+
+## Model output
+Anova(lme.sgr.2r.S) # Treatment has a significant effect
+
+```
+
+## SGR per date - Model validation
+```{r}
+#model validation of linear model of Treatment*Position+Date
+#Data is normally distributed
+mod <- lme.sgr.2r.S # set model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+plot(sgr.data.1$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+plot(fitted(mod) ~ sgr.data.1$SGR) # response data vs fitted
+par(op)
+```
+
+## SGR per date - Post hoc and plots
+```{r}
+``` {r}
+
+# Treatment
+# Get averages
+sgr.summary.T <- data_summary(sgr.data.1, varname = "SGR", groupnames = c("Treatment"))
+
+# Create ID and order dataframe
+sgr.summary.T <- tibble::rownames_to_column(sgr.summary.T, "ID")
+sgr.summary.T <- sgr.summary.T[order(as.character(sgr.summary.T$Treatment)),]
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Treatments
+hsd.sgr.T <- emmeans(lme.sgr.2r.S, specs = pairwise ~ Treatment, adjust = "tukey")
+letters.T <- multcomp::cld(hsd.sgr.T$emmeans, decreasing = TRUE, alpha = 0.05, Letters = letters) # get CLD
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SS dataframe)
+letters.T <- as.data.frame(append(letters.T,
+                                   list(Finder = paste(letters.T$Treatment, letters.T$Species, sep=":")), after = 0))
+letters.T <- letters.T[order(as.character(letters.T$Treatment)),]
+letters.T <- letters.T %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sgr.summary.T <- cbind(sgr.summary.T, siglet = letters.T$.group)
+sgr.summary.T <- sgr.summary.T[order(as.numeric(sgr.summary.T$ID)),]
+
+# Plot Treatment bar graph + error bars + letters
+SGR_Treatment<-ggplot(sgr.summary.T, aes(x = Treatment, y = SGR))+
+  geom_bar(stat = "identity", position = position_dodge())+
+ labs(y = expression(paste("SGR (", d^-1,")")), x = "Treatment")+
+ scale_y_continuous(limits=c(0, 0.026), breaks = c(0,0.01,0.02,0.03,0.04))+
+ geom_errorbar(aes(ymin=SGR-(1*se), ymax=SGR+(1*se)), width=.2, position=position_dodge(.9))+
+ geom_text(data = sgr.summary.T, aes(x=Treatment, y = SGR + se*1.5, label = siglet), vjust=0, position=position_dodge(.9))+
+ theme_economist()+scale_colour_economist()+
+ theme(
+   axis.title.x = element_text(color="black", vjust=-2, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+   axis.text.x=element_text(size=12, face = "bold", vjust=0.5),
+   axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+   axis.text.y=element_text(size=12, face = "bold", vjust=0.5)
+   )
+
+SGR_Treatment
+ggsave("Pd_SGR_Treatment.pdf") #save image
+
+
+```
+
+
+# Survival analysis
+## Data preparations
+```{r data preparations}
+
+clean.data.1 <- read_excel("PD_Cleaning experiment_new.xlsx", sheet = 1)
+
+# Create survival dataframe
+surv.data <- clean.data.1
+
+# Split Structure in two other columns: Treatment, Tree
+# Set correct data types
+surv.data <- surv.data %>% separate(Structure, c('Treatment', 'Tree'))
+surv.data$Treatment <- factor(surv.data$Treatment)
+surv.data$Tree<-factor(surv.data$Tree)
+surv.data$Species<-factor(surv.data$Species)
+surv.data$Date <- ordered(surv.data$Date, c("11/2022", "12/2022","Average"))
+surv.data$Position<-as.factor(surv.data$Position)
+
+# Select survival at end of experiment only (ignore effect of time)
+surv.data.1 <- subset(surv.data, Date == "Average")
+
+# Exclude columns not used
+surv.data.1 <- surv.data.1 %>%
+  dplyr::select(-c("Length", "Cause", "SGR", "EV"))
+
+# Get averages per structure, split per Species, Tree and Treatment
+surv.avg <- data_summary(surv.data.1, varname = "Condition", groupnames = c("Treatment","Tree"))
+surv.avg <- surv.avg %>% 
+  dplyr::select(-c("sd", "se"))
+surv.avg$Treatment <- factor(surv.avg$Treatment)
+surv.avg$Tree<-factor(surv.avg$Tree)
+
+```
+
+## Model selection
+  ### Linear model selection
+  ```{r AVG Survival}
+<!--  
+  ### Linear models (lm) couldn't be used: no data transformation could deal with this type of data
+  ### Beta regression using full data set didn't work (hopeless residuals), so using data averaged over structures  
+  -->
+  ### Averaged beta selection
+#betareg model selection
+
+# DATA PREP
+## Create dataset with average Condition per tree per treatment
+surv.avg.2<-surv.avg
+
+hist(surv.avg.2$Condition) # Check if data is normally distributed
+skewness(surv.avg.2$Condition) # Skewness coefficient = -2.989741. So, it's negatively (left) skewed
+
+# Inverse transformation on negatively skewed data
+surv.avg.2$Condition.t<-sqrt((max(surv.avg.2$Condition+1)-surv.avg.2$Condition))
+
+hist(surv.avg.2$Condition.t)
+skewness(surv.avg.2$Condition.t)
+# Skewness coefficient = 1.407428
+
+## Transform survival (%) into fraction
+surv.avg.2 <- surv.avg.2 %>% mutate(Condition.f = Condition.t/100)
+
+## Re-scale so there are no 0 and 1 in the dataset
+surv.avg.2<- surv.avg.2 %>% 
+  mutate(Condition.fc = (Condition.f * (length(Condition.f) - 1) + 0.5) / length(Condition.f))
+
+# MODEL
+## Betareg full model
+## Residuals could not be improved by variable precision nor bias correction
+bm1 <- betareg(Condition.fc ~ Treatment, data = surv.avg.2)
+
+## Model selection fixed part
+car::Anova(bm1) # Treatment has a significant effect (p=**)
+
+```
+## Model validation
+```{r AVG survival: model validation}
+##model validation of betareg model
+#data is more normally distributed after square-transformation on Condition-data
+mod <- bm1 # set betareg full model to be validated
+op <- par(mfrow = c(2, 4), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+abline(0,0)
+plot(surv.avg.2$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+plot(fitted(mod) ~ surv.avg.2$Condition.fc) # response data vs fitted
+par(op)
+
+```
+
+## Post hoc and plots
+```{r AVG survival: plots}
+
+# Treatment plot (ignoring interactions)
+# Get averages
+surv.summary.T <- data_summary(surv.data.1, varname = "Condition", groupnames = c("Treatment"))
+
+# Create ID and order dataframe by name of Finder
+surv.summary.T <- tibble::rownames_to_column(surv.summary.T, "ID")
+surv.summary.T <- surv.summary.T[order(as.character(surv.summary.T$Treatment)),]
+
+# Post hoc comparison
+hsd.surv.T <- emmeans(bm1, specs = pairwise ~ Treatment, adjust = "tukey") 
+sig.letters.surv.T <- multcomp::cld(hsd.surv.T$emmeans, alpha = 0.05, Letters = letters, decreasing = T)
+
+# Create ID and order dataframe by name (equals Finder of sgr.summary.SST dataframe)
+sig.letters.surv.T <- sig.letters.surv.T[order(as.character(sig.letters.surv.T$Treatment)),]
+sig.letters.surv.T <- sig.letters.surv.T %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+surv.summary.T <- cbind(surv.summary.T, siglet = sig.letters.surv.T$.group)
+surv.summary.T <- surv.summary.T[order(as.numeric(surv.summary.T$ID)),]
+
+# Plot Treatment bar graph + error bars + letters
+SURV_Treatment<-ggplot(surv.summary.T, aes(x = Treatment, y = Condition))+
+  geom_bar(stat = "identity", position = position_dodge())+ 
+  labs(y = "Live tissue (%)", x = "Treatment")+
+  geom_errorbar(aes(ymin=Condition-(1*se), ymax=Condition+(1*se)), width=.2,
+                position=position_dodge(.9))+
+  geom_text(data = surv.summary.T, aes(x=Treatment, y = Condition + se+4, label = siglet), vjust=0,
+            position=position_dodge(.9))+
+  theme_economist()+scale_colour_economist()+
+  theme(
+    axis.title.x = element_text(color="black", vjust=-2, size = 12, margin = margin(t = 10, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(angle = 0, size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5))+
+  scale_y_continuous(breaks= c(0, 25, 50, 75, 100), limits = c(0, 110), expand = c(0, 0))
+
+SURV_Treatment
+ggsave("Pd_Survival(AVG)_Treatment.pdf")
+
+```
+
+# Check packages used
+```{r}
+
+knitr::purl("Clean.Rmd")
+list.functions.in.file("Clean.R")
+unlink("Clean.R")
+
+```
+
