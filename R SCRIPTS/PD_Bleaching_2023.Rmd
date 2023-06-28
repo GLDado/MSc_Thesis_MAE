@@ -1,0 +1,260 @@
+---
+  title: "Bleaching"
+author: "Ewout Knoester & Gian Lu Dado"
+date: "22 March 2023"
+output: html_document
+---
+  
+  # Setup and data import
+  
+  ```{r setup, inclue = "FALSE", message = "FALSE"}
+
+rm(list=ls()) # Clear workspace
+knitr::opts_knit$set(root.dir = '/tmp') #Set directory at current directory for all subsequent chunks
+
+setwd("~/Documents/Analysis/PDAMICORNIS")
+getwd()
+
+library(readxl)
+library(tidyverse)
+library(stringr) # remove spaces
+library(panelr) # Convert data from wide to long
+library(rstatix)
+library(ggpubr)
+library(ggthemes)
+library(nlme) # mixed models allowing for heterogeneity
+library(multcomp) # add significance levels to plot
+library(emmeans) # Pairwise comparisons
+library(NCmisc) # Check packages used
+library(writexl)
+
+# load first xls sheet
+my_data.raw <- read_excel("Coral bleaching - experiment Pdamicornis 2022.xlsx", sheet = 1)
+
+# Function to facilitate averaging a dataset
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE),
+      n  = length(x[[col]]),
+      se = sd(x[[col]], na.rm=TRUE)/sqrt(length(x)))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+  return(data_sum)
+}
+```
+
+<!-- 
+  Data info:
+  Treatments example: IntToSub = Coral of Intertidal origin, grown in the Subtidal
+Brightness expressed in bpp, where 0 = black and 255 = white
+Adjusted brightness: Correct brightness of fragment using brightness of slate, assuming slate should be 255 bpp
+Survival = Cover of live coral tissue per fragment
+AVG Brightness & AVG Survival = Average per 8 fragments (Tree)
+Diff Survival = Difference between End and Start (= 2023-02-01) survival
+-->
+  
+  # Data preparation
+  ```{r all fragments: data prep, inclue = "FALSE", message = "FALSE"}
+
+my_data.raw.1 <- as.data.frame(long_panel(my_data.raw, prefix = "_" , begin = 0, end = 2, label_location = "end"))
+
+my_data.raw.1$Cause[my_data.raw.1$Survival > 0] <- NA # All fragments with Survival>0.0 are considered alive
+
+# Select relevant columns: id, Tree, Treatment, Date, Adjusted brightness
+my_data.B <- my_data.raw.1 %>% separate(Structure, c('Treatment', 'Tree')) # split Structure-column into Tree and Treatment
+
+my_data.B <- my_data.B %>%
+  dplyr::select(c("id", "Tree","Treatment", "Fragment",
+           "Date", "Adjusted brightness (0 - 255)")) 
+
+# Turn dates into number of days from start (07/02/2020)
+startdate <- as.Date("2022/11/02", "%Y/%m/%d")
+my_data.B$Date_days <- as.numeric(difftime(my_data.B$Date, startdate, units = "days"), units = "days")
+
+# Fill Date diff with conditional values from Date_days: ie make start days a categorical variable (0,1,NA)
+my_data.B$Date_diff <- ifelse(my_data.B$Date_days < 7, "0",
+                   ifelse(my_data.B$Date_days < 50, "1","2"))
+
+## Set date difference and rename
+date.diff.order = c("0", 
+                  "1", 
+                  "2")
+my_data.B %<>% 
+  mutate(Date_diff = Date_diff %>% 
+           factor(levels = date.diff.order))
+
+# change headers of column bleaching
+names(my_data.B)[6] <- "Bleaching"
+
+# Make treatment and days factors
+my_data.B$Treatment <- factor(my_data.B$Treatment)
+my_data.B$Tree <- factor(my_data.B$Tree)
+my_data.B$Date_diff <- as.factor(my_data.B$Date_diff)
+my_data.B$Fragment <- as.factor(my_data.B$Fragment)
+
+# Remove data from February 2023
+my_data.B$Date <- format(my_data.B$Date, "%Y-%m")
+my_data.B <- subset(my_data.B, Date != "2023-02")
+
+# get insight into NAs
+my_data.B %>%
+  group_by(Treatment) %>%
+  summarize(Sum_NA = sum(is.na(Bleaching)))
+
+# removing rows containing NAs, thereby excluding Missing and Dead fragments, and missing pictures
+my_data.B1 <- na.omit(my_data.B)
+
+# get insight into NAs
+my_data.B1 %>%
+  group_by(Treatment) %>%
+  summarize(Sum_NA = sum(is.na(Bleaching)))
+
+write_xlsx(my_data.B1, "PD_Coral bleaching_Cleaning experiment.xlsx")
+
+```
+
+# Analysis
+## All fragments
+### Data exploration
+
+```{r all fragments: data exp}
+
+# Import excel sheet
+my_data.B1 <- read_excel("PD_Coral bleaching_Cleaning experiment.xlsx", sheet = 1)
+
+# Make treatment and days factors
+my_data.B1$Treatment <- factor(my_data.B1$Treatment)
+my_data.B1$Tree <- factor(my_data.B1$Tree)
+my_data.B1$Date_diff <- as.factor(my_data.B1$Date_diff)
+
+# Visualizing data with box plots: heterogeneity likely over Date and Treatment
+boxplot(Bleaching ~ Date, data = my_data.B1, xlab = "Date", ylab = "Brightness (bpp)")
+boxplot(Bleaching ~ Treatment, data = my_data.B1, xlab = "Treatment", ylab = "Brightness (bpp)")
+
+# Normality tests: response data is rights skewed
+ggqqplot(my_data.B1, x = "Bleaching")
+hist(my_data.B1$Bleaching)
+
+
+# visualizing log10(response) data with box plots: still heterogeneity likely over Date and Treatment
+boxplot(log10(Bleaching)~Date, data = my_data.B1, xlab = "Date", ylab = "LOG10(Brightness(bpp))")
+boxplot(log10(Bleaching)~Treatment, data = my_data.B1, xlab = "Treatment", ylab = "LOG10(Brightness(bpp))")
+
+# normality test of log10(response): data is normally distributed
+hist(log10(my_data.B1$Bleaching))
+```
+
+### Model selection
+```{r all fragments: model selex}
+
+# Import excel sheet
+my_data.B1 <- read_excel("PD_Coral bleaching_Cleaning experiment.xlsx", sheet = 1)
+
+# Make treatment and days factors
+my_data.B1$Treatment <- factor(my_data.B1$Treatment)
+my_data.B1$Tree <- factor(my_data.B1$Tree)
+my_data.B1$Date_diff <- as.factor(my_data.B1$Date_diff)
+
+# Full model with random structure for Structure and Date (using structure ID)
+Model.all.log  <- lme(log10(Bleaching) ~ Treatment*Date_diff, random = ~1|Tree, data = my_data.B1) #-1280.878
+
+# Full model allowing heterogeneity
+Model.all.log2 <- lme(log10(Bleaching) ~ Treatment*Date_diff, random = ~1|Tree, data = my_data.B1, weights = varIdent(form = ~1|Date_diff)) #-1279.522
+
+Model.all.log3 <- lme(log10(Bleaching) ~ Treatment*Date_diff, random = ~1|Tree, data = my_data.B1, weights = varIdent(form = ~1|Treatment)) #-1279.159
+
+lmc <- lmeControl(niterEM = 5200, msMaxIter = 5200) # more iterations to reach convergence (will take some mins)
+
+Model.all.log4 <- lme(log10(Bleaching) ~ Treatment*Date_diff, random = ~1|Tree, data = my_data.B1, weights = varIdent(form = ~1|Treatment*Date_diff), control = lmc) #-1282.268
+
+# Allowing Treatment*Date_days heterogeneity best choice, despite increase in df:
+AIC(Model.all.log, Model.all.log2, Model.all.log3, Model.all.log4)
+
+anova(Model.all.log4) # All variables are highly significant: best model!
+summary(Model.all.log4)
+
+```
+
+### Model validation
+```{r all fragments: model val}
+
+# Data is normally distributed
+mod <- Model.all.log4 # set model to be validated
+op <- par(mfrow = c(2, 3), mar = c(5, 4, 1, 2)) # set layout of figure frame
+plot(resid(mod, type = "pearson") ~ fitted(mod)) # fitted vs residuals
+abline(0,0)
+hist(resid(mod, type = "pearson"), main = "") # histogram residuals
+qqnorm(resid(mod, type = "pearson")) # QQplot residuals
+plot(my_data.B1$Date_diff, resid(mod, type = "pearson")) # residuals split over Date
+abline(0,0)
+plot(my_data.B1$Treatment, resid(mod, type = "pearson")) # residuals split over Treatment
+abline(0,0)
+plot(my_data.B1$Fragment, resid(mod, type = "pearson")) # residuals split over Fragment
+abline(0,0)
+plot(fitted(mod) ~ log10(my_data.B1$Bleaching)) # response (log) data vs fitted (log)
+par(op)
+
+```
+
+### Post hoc and plots
+```{r}
+
+# Boxplot
+# Get average values, SD and SE of Bleaching split per Date and Treatment
+sum.all.log1 <- data_summary(my_data.B1, varname = "Bleaching", groupnames = c("Date_diff", "Treatment"))
+
+# Create unique Finder (Date:Treatment) to sort data
+sum.all.log1 <- as.data.frame(append(sum.all.log1,
+                                     list(Finder = paste(sum.all.log1$Date_diff, sum.all.log1$Treatment, sep=":")), after = 0))
+
+# Create ID (matching order of the Finder)
+sum.all.log1 <- tibble::rownames_to_column(sum.all.log1, "ID") # create ID from rownames
+
+# Perform post hoc and get significance letters (Compact Letter Display) between Date_diff within each Treatment
+ph.all.log1 <- emmeans(Model.all.log4, specs = pairwise ~ Date_diff|Treatment, adjust = "tukey", type = "response")
+letters.all.log1 <- multcomp::cld(ph.all.log1$emmeans, alpha = 0.05, Letters = letters) # get CLD
+
+# Order dataframe by Date_diff (matching sum dataframe)
+letters.all.log1 <- letters.all.log1[order(as.numeric(letters.all.log1$Date_diff)),] # order by Date_diff
+letters.all.log1 <- letters.all.log1 %>% mutate(.group = str_squish(.group)) # remove white spaces
+
+# Merge sig.letter dataframe into the summary dataframe
+sum.all.log1 <- cbind(sum.all.log1, siglet = letters.all.log1$.group)
+
+colours = c("red", "orange", "yellow") # set colours for the plot
+  
+#Plot Treatment*Date_diff
+All_Bleaching_Interaction <-ggplot(data=my_data.B1, aes(x=Treatment, y = Bleaching, fill = Date_diff)) +
+  geom_boxplot()+
+  labs(y= "Brightness (bpp)", x = "Treatment",fill="Date") +
+  scale_y_continuous(breaks= c(0,50,100,150,200), limits = c(0,230), expand = c(0, 0)) +
+  scale_fill_manual(labels = c("11/2022", "12/2022","02/2023"),values=c(colours)) +
+  geom_text(data = sum.all.log1, aes(x = Treatment, y = Bleaching + se+4, label = siglet), vjust=-19, position=position_dodge(.8)) +
+  theme_economist() + scale_colour_economist() +
+  theme(
+    legend.title = element_text(color="black", vjust=0.5, size = 15), 
+    legend.text = element_text(size=12, vjust=0.5),
+    axis.title.x = element_text(color="black", vjust=4, size = 12, margin = margin(t = 20, r = 0, b = 0, l = 0)),
+    axis.text.x = element_text(size=12, face = "bold", vjust=0.5),
+    axis.title.y = element_text(color="black" , vjust=4, size = 12, margin = margin(t = 20, r = 10, b = 0, l = 10)),
+    axis.text.y=element_text(size=12, face = "bold", vjust=0.5),
+    axis.ticks.length.x = unit(c(0,2), "mm"))
+
+All_Bleaching_Interaction
+ggsave("Pd_All_Bleaching_interaction_Treatment.pdf") #save image
+
+
+```
+
+# Check packages used
+```{r}
+
+knitr::purl("Bleaching.Rmd")
+list.functions.in.file("Bleaching.R")
+unlink("Bleaching.R")
+
+```
